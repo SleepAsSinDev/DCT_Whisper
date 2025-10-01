@@ -60,9 +60,9 @@ except ImportError:  # pragma: no cover - offline fallback
     google_requests = _DummyRequestModule()  # type: ignore
     id_token = _DummyIdToken()  # type: ignore
 
-from .config import get_settings
-from .limiter import RateLimiter, create_limiter
-from .usage_store import usage_store
+from config import get_settings
+from limiter import RateLimiter, create_limiter
+from usage_store import usage_store
 
 app = FastAPI(title="Whisper Proxy")
 settings = get_settings()

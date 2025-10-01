@@ -1,158 +1,156 @@
-"""Track usage reservations and quotas in-memory (with optional SQLite hooks)."""
+# backend/usage_store.py
+"""
+Usage store (in-memory, thread-safe) สำหรับนับโควตา/งาน
+- นาทีต่อวัน/เดือน (minutes_today / minutes_month)
+- reservation -> commit / rollback
+- running jobs ต่อ user/tenant
+หมายเหตุ: โปรดเปลี่ยนเป็นฐานข้อมูลจริง (Postgres/Redis) เมื่อขึ้นโปรดักชัน
+"""
+
 from __future__ import annotations
-
-import asyncio
-from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date
+from datetime import datetime, timezone
+from threading import RLock
 from typing import Dict, Tuple
+import math
+
+
+def _day_key() -> str:
+    # ใช้ UTC ให้สอดคล้องกันทุกอินสแตนซ์
+    return datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
+def _month_key() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m")
 
 
 @dataclass
-class UsageJob:
-    user_id: str
-    tenant_id: str
-    reserved_minutes: int
-    task_id: str
-
-
-@dataclass
-class UsageRecord:
-    day: date
-    month: Tuple[int, int]
+class UserCounters:
     minutes_today: int = 0
     minutes_month: int = 0
     reserved_minutes: int = 0
-    active_jobs: int = 0
+    running_jobs: int = 0
 
 
 class UsageStore:
-    """Usage accounting helper implementing reservation/commit logic."""
+    """
+    โครงสร้างข้อมูล:
+      - per (tenant_id, user_id, day)   -> minutes_today
+      - per (tenant_id, user_id, month) -> minutes_month
+      - per (tenant_id, user_id)        -> UserCounters (รวม reserved & running_jobs)
+      - per tenant_id                   -> running_jobs_tenant
+    """
 
     def __init__(self) -> None:
-        self._lock = asyncio.Lock()
-        self._user_records: Dict[str, UsageRecord] = {}
-        self._tenant_records: Dict[str, UsageRecord] = {}
-        self._jobs: Dict[str, UsageJob] = {}
+        self._lock = RLock()
+        self._per_user_day: Dict[Tuple[str, str, str], int] = {}
+        self._per_user_month: Dict[Tuple[str, str, str], int] = {}
+        self._user_counters: Dict[Tuple[str, str], UserCounters] = {}
+        self._running_jobs_tenant: Dict[str, int] = {}
 
-    async def reserve(
-        self,
-        user_id: str,
-        tenant_id: str,
-        minutes: int,
-        job_id: str,
-        limits: dict,
-    ) -> None:
-        async with self._lock:
-            self._ensure_records(user_id, tenant_id)
-            user = self._user_records[user_id]
-            tenant = self._tenant_records[tenant_id]
+    # ---------- helpers ----------
+    def _uc(self, tenant_id: str, user_id: str) -> UserCounters:
+        key = (tenant_id, user_id)
+        if key not in self._user_counters:
+            self._user_counters[key] = UserCounters()
+        return self._user_counters[key]
 
-            if user.active_jobs >= limits["concurrent_user"]:
-                raise RuntimeError("concurrency_user")
-            if tenant.active_jobs >= limits["concurrent_tenant"]:
-                raise RuntimeError("concurrency_tenant")
+    def _get_today(self, tenant_id: str, user_id: str) -> int:
+        return self._per_user_day.get((tenant_id, user_id, _day_key()), 0)
 
+    def _get_month(self, tenant_id: str, user_id: str) -> int:
+        return self._per_user_month.get((tenant_id, user_id, _month_key()), 0)
 
-            day_limit = limits.get("minutes_per_day", 0)
-            if day_limit > 0 and user.minutes_today + user.reserved_minutes + minutes > day_limit:
-                raise RuntimeError("quota_day")
-            month_limit = limits.get("minutes_per_month", 0)
-            if month_limit > 0 and user.minutes_month + user.reserved_minutes + minutes > month_limit:
-
-            if user.minutes_today + user.reserved_minutes + minutes > limits["minutes_per_day"]:
-                raise RuntimeError("quota_day")
-            if user.minutes_month + user.reserved_minutes + minutes > limits["minutes_per_month"]:
-
-                raise RuntimeError("quota_month")
-
-            user.reserved_minutes += minutes
-            user.active_jobs += 1
-            tenant.reserved_minutes += minutes
-            tenant.active_jobs += 1
-            self._jobs[job_id] = UsageJob(user_id, tenant_id, minutes, task_id=job_id)
-
-    async def confirm(self, reservation_id: str, task_id: str) -> None:
-        async with self._lock:
-            job = self._jobs.pop(reservation_id, None)
-            if not job:
-                raise RuntimeError("reservation_missing")
-            job.task_id = task_id
-            self._jobs[task_id] = job
-
-    async def commit(self, task_id: str, minutes_actual: int) -> None:
-        async with self._lock:
-            job = self._jobs.pop(task_id, None)
-            if not job:
-                return
-            user = self._user_records[job.user_id]
-            tenant = self._tenant_records[job.tenant_id]
-            self._apply_period_rollover(user)
-            self._apply_period_rollover(tenant)
-
-            reserved = job.reserved_minutes
-            user.reserved_minutes = max(0, user.reserved_minutes - reserved)
-            tenant.reserved_minutes = max(0, tenant.reserved_minutes - reserved)
-            user.active_jobs = max(0, user.active_jobs - 1)
-            tenant.active_jobs = max(0, tenant.active_jobs - 1)
-            user.minutes_today += minutes_actual
-            tenant.minutes_today += minutes_actual
-            user.minutes_month += minutes_actual
-            tenant.minutes_month += minutes_actual
-
-    async def rollback(self, job_id: str) -> None:
-        async with self._lock:
-            job = self._jobs.pop(job_id, None)
-            if not job:
-                return
-            user = self._user_records[job.user_id]
-            tenant = self._tenant_records[job.tenant_id]
-            self._apply_period_rollover(user)
-            self._apply_period_rollover(tenant)
-            reserved = job.reserved_minutes
-            user.reserved_minutes = max(0, user.reserved_minutes - reserved)
-            tenant.reserved_minutes = max(0, tenant.reserved_minutes - reserved)
-            user.active_jobs = max(0, user.active_jobs - 1)
-            tenant.active_jobs = max(0, tenant.active_jobs - 1)
-
-    async def get_usage(self, user_id: str, tenant_id: str) -> dict:
-        async with self._lock:
-            self._ensure_records(user_id, tenant_id)
-            user = self._user_records[user_id]
-            tenant = self._tenant_records[tenant_id]
+    # ---------- public API ----------
+    def snapshot(self, tenant_id: str, user_id: str) -> Dict[str, int]:
+        with self._lock:
+            uc = self._uc(tenant_id, user_id)
             return {
-                "user": {
-                    "minutes_today": user.minutes_today,
-                    "minutes_month": user.minutes_month,
-                    "reserved_minutes": user.reserved_minutes,
-                    "active_jobs": user.active_jobs,
-                },
-                "tenant": {
-                    "minutes_today": tenant.minutes_today,
-                    "minutes_month": tenant.minutes_month,
-                    "reserved_minutes": tenant.reserved_minutes,
-                    "active_jobs": tenant.active_jobs,
-                },
+                "minutes_today": self._get_today(tenant_id, user_id),
+                "minutes_month": self._get_month(tenant_id, user_id),
+                "reserved_minutes": uc.reserved_minutes,
+                "running_jobs_user": uc.running_jobs,
+                "running_jobs_tenant": self._running_jobs_tenant.get(tenant_id, 0),
             }
 
-    def _ensure_records(self, user_id: str, tenant_id: str) -> None:
-        if user_id not in self._user_records:
-            self._user_records[user_id] = UsageRecord(day=date.today(), month=(date.today().year, date.today().month))
-        if tenant_id not in self._tenant_records:
-            self._tenant_records[tenant_id] = UsageRecord(day=date.today(), month=(date.today().year, date.today().month))
-        self._apply_period_rollover(self._user_records[user_id])
-        self._apply_period_rollover(self._tenant_records[tenant_id])
+    def can_consume_minutes(
+        self,
+        tenant_id: str,
+        user_id: str,
+        estimate_minutes: int,
+        limits: Dict[str, int],
+    ) -> bool:
+        """
+        ตรวจว่านับรวม reserved แล้ว จะเกิน minutes_per_day / minutes_per_month หรือไม่
+        """
+        est = max(1, int(math.ceil(estimate_minutes)))
+        with self._lock:
+            uc = self._uc(tenant_id, user_id)
+            minutes_today = self._get_today(tenant_id, user_id)
+            minutes_month = self._get_month(tenant_id, user_id)
 
-    def _apply_period_rollover(self, record: UsageRecord) -> None:
-        today = date.today()
-        if record.day != today:
-            record.day = today
-            record.minutes_today = 0
-            record.reserved_minutes = 0
-        current_month = (today.year, today.month)
-        if record.month != current_month:
-            record.month = current_month
-            record.minutes_month = 0
+            if minutes_today + uc.reserved_minutes + est > limits["minutes_per_day"]:
+                return False
+            if minutes_month + uc.reserved_minutes + est > limits["minutes_per_month"]:
+                return False
+            return True
+
+    def reserve_minutes(self, tenant_id: str, user_id: str, estimate_minutes: int) -> None:
+        """
+        กันนาทีไว้ชั่วคราวก่อนส่งงานจริง
+        """
+        est = max(1, int(math.ceil(estimate_minutes)))
+        with self._lock:
+            uc = self._uc(tenant_id, user_id)
+            uc.reserved_minutes += est
+
+    def rollback_minutes(self, tenant_id: str, user_id: str, estimate_minutes: int) -> None:
+        """
+        ยกเลิกการกันนาที (เมื่อ job submit ล้มเหลว)
+        """
+        est = max(1, int(math.ceil(estimate_minutes)))
+        with self._lock:
+            uc = self._uc(tenant_id, user_id)
+            uc.reserved_minutes = max(0, uc.reserved_minutes - est)
+
+    def commit_minutes(self, tenant_id: str, user_id: str, actual_minutes: int) -> None:
+        """
+        ยืนยันการใช้นาทีจริง (เมื่องานเสร็จ)
+        - ตัด reserved ออก (เท่าที่กันไว้)
+        - เติมลง counters วัน/เดือน
+        """
+        amt = max(1, int(math.ceil(actual_minutes)))
+        dayk = (tenant_id, user_id, _day_key())
+        monthk = (tenant_id, user_id, _month_key())
+        with self._lock:
+            self._per_user_day[dayk] = self._per_user_day.get(dayk, 0) + amt
+            self._per_user_month[monthk] = self._per_user_month.get(monthk, 0) + amt
+
+            uc = self._uc(tenant_id, user_id)
+            # ตัด reserved ตามจริง แต่อย่าติดลบ
+            uc.reserved_minutes = max(0, uc.reserved_minutes - amt)
+
+    # ---------- running jobs ----------
+    def inc_running(self, tenant_id: str, user_id: str) -> None:
+        with self._lock:
+            uc = self._uc(tenant_id, user_id)
+            uc.running_jobs += 1
+            self._running_jobs_tenant[tenant_id] = self._running_jobs_tenant.get(tenant_id, 0) + 1
+
+    def dec_running(self, tenant_id: str, user_id: str) -> None:
+        with self._lock:
+            uc = self._uc(tenant_id, user_id)
+            uc.running_jobs = max(0, uc.running_jobs - 1)
+            self._running_jobs_tenant[tenant_id] = max(0, self._running_jobs_tenant.get(tenant_id, 0) - 1)
+
+    def running_user(self, tenant_id: str, user_id: str) -> int:
+        with self._lock:
+            return self._uc(tenant_id, user_id).running_jobs
+
+    def running_tenant(self, tenant_id: str) -> int:
+        with self._lock:
+            return self._running_jobs_tenant.get(tenant_id, 0)
 
 
+# สร้างอินสแตนซ์เดียวให้ main.py import ไปใช้
 usage_store = UsageStore()
