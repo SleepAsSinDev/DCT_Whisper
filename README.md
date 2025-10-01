@@ -79,8 +79,13 @@ Default limits (override via environment):
 - `RPM_PER_TENANT=120`
 - `CONCURRENT_USER=1`
 - `CONCURRENT_TENANT=5`
+- 
+- `MINUTES_PER_DAY=120`
+- `MINUTES_PER_MONTH=0` *(unlimited)*
+
 - `MINUTES_PER_DAY=60`
 - `MINUTES_PER_MONTH=1200`
+
 - `DEFAULT_MODEL=large-v3`
 - `ALLOW_DIARIZATION=false`
 
