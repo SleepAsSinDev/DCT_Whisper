@@ -53,11 +53,17 @@ class UsageStore:
             if tenant.active_jobs >= limits["concurrent_tenant"]:
                 raise RuntimeError("concurrency_tenant")
 
+
             day_limit = limits.get("minutes_per_day", 0)
             if day_limit > 0 and user.minutes_today + user.reserved_minutes + minutes > day_limit:
                 raise RuntimeError("quota_day")
             month_limit = limits.get("minutes_per_month", 0)
             if month_limit > 0 and user.minutes_month + user.reserved_minutes + minutes > month_limit:
+
+            if user.minutes_today + user.reserved_minutes + minutes > limits["minutes_per_day"]:
+                raise RuntimeError("quota_day")
+            if user.minutes_month + user.reserved_minutes + minutes > limits["minutes_per_month"]:
+
                 raise RuntimeError("quota_month")
 
             user.reserved_minutes += minutes

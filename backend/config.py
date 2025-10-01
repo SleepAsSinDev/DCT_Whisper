@@ -39,8 +39,13 @@ class Settings:
     rpm_per_tenant: int = 120
     concurrent_user: int = 1
     concurrent_tenant: int = 5
+
     minutes_per_day: int = 120
     minutes_per_month: int = 0
+
+    minutes_per_day: int = 60
+    minutes_per_month: int = 1200
+
     default_model: str = "large-v3"
     allow_diarization: bool = False
 
