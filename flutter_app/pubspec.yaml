@@ -1,0 +1,25 @@
+name: whisper_proxy_demo
+description: Flutter client for Whisper proxy demo
+publish_to: 'none'
+version: 1.0.0+1
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dio: ^5.4.0
+  file_picker: ^6.1.1
+  ffmpeg_kit_flutter_min_gpl: ^6.0.3
+  firebase_core: ^2.25.4
+  firebase_auth: ^4.17.4
+
+  cupertino_icons: ^1.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
