@@ -3,9 +3,9 @@ services:
   api:
     build: .
     env_file:
-      - .env.example
+      - .env
     ports:
-      - "8080:8080"
+      - "8081:8081"
     depends_on:
       - redis
   redis:
